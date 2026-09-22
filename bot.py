@@ -84,8 +84,22 @@ async def pdf_handler(message: types.Message):
     await message.answer_document(document, caption="Вот ваш PDF документ")
 
 
+from aiohttp import web
+
+async def handle_ping(request):
+    return web.Response(text="Bot is alive!")
+
 async def main():
-    print("Бот запущен...")
+    # Запускаем простейший веб-сервер для Render на порту 10000
+    app = web.Application()
+    app.router.add_get('/', handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 10000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+
+    print("Бот и веб-сервер запущены...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
