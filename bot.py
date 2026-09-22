@@ -1,179 +1,155 @@
 import os
-import io
-import json
 import asyncio
-import textwrap
-from aiohttp import web
+import urllib.parse
+import logging
+import requests
+import json
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import Command
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from google import genai
 
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import CommandStart
-from aiogram.types import BufferedInputFile
+from fastapi import FastAPI
+import uvicorn
 
-from PIL import Image, ImageDraw, ImageFont
-from openai import OpenAI
+# --- НАСТРОЙКИ ---
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8916069792:AAHJYqH3NL42DpW4o-yA3vyN9B4gnuef8DI").strip()
 
-# Redder irraa geeddaramtoota naannoo (Environment Variables) fudhachuu
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+# Список ключей Gemini
+GEMINI_KEYS = [
+    "AQ.Ab8RN6Lm1ouWvN0dozlZ2JMeQxzHYoRJfAKe8XdrG6NppLGd1Q",
+    "AQ.Ab8RN6Lyunpjqo_qcbckjnHj0DErBBwbSsk0RHAvcg77Mgi1BQ",
+    "AQ.Ab8RN6Lm1ePrmlKDffIqjRVuALOfPgPdzrhtmkjBS0diyEQudA"
+]
 
-bot = Bot(token=BOT_TOKEN)
+# Актуальные названия моделей для SDK google-genai
+MODELS_TO_TRY = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
+
+logging.basicConfig(level=logging.INFO)
+
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
 dp = Dispatcher()
 
-# OpenRouter client qopheessuu
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_API_KEY,
-) if OPENROUTER_API_KEY else None
+# --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
+app = FastAPI()
 
-# Jechoota Qubee Sirriitti Mul'isuuf (Font)
-FONT_PATH = "Roboto-Regular.ttf"
+@app.get("/")
+@app.get("/health")
+async def health():
+    return {"status": "ok", "bot": "AI Infographic Generator"}
 
-def get_font(size: int):
+# --- ФУНКЦИЯ ДЛЯ БЕЗОПАСНОГО ВЫЗОВА GEMINI С РОТАЦИЕЙ КЛЮЧЕЙ И МОДЕЛЕЙ ---
+async def generate_gemini_safe(prompt):
+    for key in GEMINI_KEYS:
+        # В новом SDK используется http_options вместо client_options
+        client = genai.Client(api_key=key, http_options={'api_version': 'v1alpha'})
+        for model_name in MODELS_TO_TRY:
+            try:
+                res = await client.aio.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config={'response_mime_type': 'application/json'}
+                )
+                if res and res.text:
+                    logging.info(f"✅ Успешный ответ от модели: {model_name}")
+                    return res.text
+            except Exception as e:
+                logging.warning(f"Ошибка с моделью {model_name} (ключ ...{key[-5:]}): {e}. Пробуем дальше...")
+                await asyncio.sleep(0.5)
+    return None
+
+# --- ГЕНЕРАЦИЯ PDF-СХЕМЫ ЧЕРЕЗ QuickChart ---
+def get_quickchart_pdf(dot_code, user_id):
+    clean_code = dot_code.replace("```dot", "").replace("```", "").strip()
+    encoded_code = urllib.parse.quote(clean_code)
+    url = f"https://quickchart.io/graphviz?format=pdf&graph={encoded_code}"
+    
     try:
-        return ImageFont.truetype(FONT_PATH, size)
-    except Exception:
-        return ImageFont.load_default()
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Ошибка при запросе к QuickChart: {e}")
+        return None
 
-# --- Ajaja Ajajamu (System Prompt) ---
-SYSTEM_PROMPT = """
-You are a UI/UX designer. Output ONLY valid JSON (without markdown ```json wrappers) for an image config (1000x800 px).
+    filename = f"infographic_{user_id}.pdf"
+    with open(filename, "wb") as f:
+        f.write(response.content)
+    return filename
 
-JSON structure:
-{
-  "bg_color": "#HEX",
-  "shapes": [
-    {"type": "rectangle" | "circle" | "line", "coords": [x1, y1, x2, y2], "color": "#HEX", "width": 2}
-  ],
-  "texts": [
-    {"text": "Text in Russian", "x": 100, "y": 100, "color": "#HEX", "size": 24, "max_width": 30}
-  ]
-}
-"""
+# --- ХЕНДЛЕРЫ ---
 
-# --- PNG Fakkii Uumuu ---
-def draw_image_from_config(config: dict) -> bytes:
-    img = Image.new("RGB", (1000, 800), color=config.get("bg_color", "#0b0d17"))
-    draw = ImageDraw.Draw(img)
-
-    # 1. Bifa (Shapes) fakkessuu
-    for shape in config.get("shapes", []):
-        stype = shape.get("type")
-        coords = shape.get("coords", [0, 0, 100, 100])
-        color = shape.get("color", "#ffffff")
-        width = shape.get("width", 2)
-
-        if stype == "rectangle":
-            draw.rectangle(coords, fill=color)
-        elif stype == "circle":
-            draw.ellipse(coords, fill=color)
-        elif stype == "line":
-            draw.line(coords, fill=color, width=width)
-
-    # 2. Barruu (Text) barreessuu
-    for text_info in config.get("texts", []):
-        raw_text = text_info.get("text", "")
-        x = text_info.get("x", 50)
-        y = text_info.get("y", 50)
-        color = text_info.get("color", "#ffffff")
-        size = text_info.get("size", 20)
-        max_width = text_info.get("max_width", 35)
-
-        font = get_font(size)
-        wrapped_lines = textwrap.wrap(raw_text, width=max_width)
-        
-        current_y = y
-        for line in wrapped_lines:
-            draw.text((x, current_y), line, fill=color, font=font)
-            current_y += size + 4
-
-    buffer = io.BytesIO()
-    img.save(buffer, format="PNG")
-    buffer.seek(0)
-    return buffer.getvalue()
-
-
-# --- Ergaa Telegram ---
-@dp.message(CommandStart())
-async def start_handler(message: types.Message):
-    await message.answer(
-        "Akkam! Mata duree fakkii maaliitu siif uumamu barbaadda?\n\n"
-        "Fakkeenyaaf: *'Черная дыра'* ykn *'Кофейня'*"
-    )
+@dp.message(Command("start"))
+async def cmd_start(msg: types.Message):
+    await msg.answer("🤖 **Привет! Я бот для создания инфографики.**\n\nПросто отправь мне любой текст (тему проекта, описание процесса, список идей), и я создам по нему схему-инфографику в формате PDF.")
 
 @dp.message(F.text)
-async def generate_custom_image(message: types.Message):
-    if not client:
-        await message.answer("❌ Owwaannaa: OPENROUTER_API_KEY Render irratti hin saagalle!")
-        return
+async def handle_user_text(msg: types.Message):
+    user_text = msg.text
+    status_msg = await msg.answer("⏳ **ИИ анализирует ваш текст и генерирует схему-инфографику...**")
 
-    user_prompt = message.text
-    status_msg = await message.answer("📊 OpenRouter AI fayyadamnee fakkii qopheessaa jirra...")
+    prompt = f"""
+    На основе следующего текста:
+    ---
+    {user_text}
+    ---
+    Создай логическую схему (инфографику) в формате Graphviz (DOT). 
+    Схема должна иметь:
+    1. Направление сверху вниз (rankdir=TB).
+    2. Узлы (nodes) формы 'box' (прямоугольники) со скругленными углами.
+    3. Цвета: фон белый, узлы светло-голубые (lightblue), текст черный.
+    4. Отрази 5-7 ключевых идей, этапов или связей из текста.
+    5. Текст внутри блоков должен быть на РУССКОМ языке, кратким и понятным.
+    
+    Верни ответ строго в формате JSON с одним ключом 'dot_code':
+    {{
+      "dot_code": "код_graphviz_здесь"
+    }}
+    """
 
-    # Tarree modelliwwan bilisaa (Free models)
-    FREE_MODELS = [
-        "google/gemini-2.0-flash-exp:free",
-        "google/gemini-flash-1.5-8b:free",
-        "meta-llama/llama-3.1-8b-instruct:free",
-        "qwen/qwen-2.5-7b-instruct:free",
-        "mistralai/mistral-7b-instruct:free"
-    ]
+    ai_res = await generate_gemini_safe(prompt)
 
-    response = None
-    last_error = ""
-
-    # Tokko tokkoon yaaluu
-    for model_name in FREE_MODELS:
-        try:
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt}
-                ]
-            )
-            if response and response.choices:
-                print(f"Modelliin hojjete: {model_name}")
-                break
-        except Exception as e:
-            last_error = str(e)
-            print(f"Model {model_name} hin hojjenne, isa itti aanutti darbina...")
-            await asyncio.sleep(1)
-            continue
-
-    if not response or not response.choices:
-        await status_msg.edit_text(f"❌ Dogoggora: Modelliin bilisaa tajaajila ala ta'aniiru. {last_error[:150]}")
+    if not ai_res:
+        await status_msg.edit_text("❌ Сервер ИИ временно перегружен или не смог обработать ваш запрос. Попробуйте еще раз через минуту.")
         return
 
     try:
-        raw_content = response.choices[0].message.content
-        raw_json = raw_content.replace("```json", "").replace("```", "").strip()
-        config = json.loads(raw_json)
+        res_data = json.loads(ai_res)
+        dot_code = res_data.get('dot_code')
 
-        png_bytes = draw_image_from_config(config)
-        photo = BufferedInputFile(png_bytes, filename="infographic.png")
+        if not dot_code:
+            await status_msg.edit_text("❌ ИИ не смог сгенерировать код схемы по вашему тексту. Попробуйте другой текст или тему.")
+            return
 
+        file_infographic = get_quickchart_pdf(dot_code, msg.from_user.id)
+
+        if not file_infographic:
+            await status_msg.edit_text("❌ Произошла ошибка при создании инфографики. Пожалуйста, попробуйте еще раз.")
+            return
+
+        await bot.send_document(msg.chat.id, types.FSInputFile(file_infographic), caption="📂 **Ваша инфографика:**\n\n_Эта схема построена программно на основе вашего текста._")
+        
         await status_msg.delete()
-        await message.answer_photo(photo, caption=f"Fakkii uumame: *{user_prompt}*")
+        
+        if os.path.exists(file_infographic): os.remove(file_infographic)
 
+    except json.JSONDecodeError:
+        logging.error(f"JSONDecodeError: ИИ вернул невалидный JSON: {ai_res}")
+        await status_msg.edit_text("❌ ИИ вернул некорректный формат. Пожалуйста, попробуйте еще раз с другим текстом.")
     except Exception as e:
-        await status_msg.edit_text(f"❌ Dogoggora JSON: {str(e)}")
+        logging.error(f"Error: {e}")
+        await msg.answer("❌ Произошла ошибка обработки. Попробуйте отправить текст повторно.")
 
-
-# --- Server Render.com Webhook/Ping ---
-async def handle_ping(request):
-    return web.Response(text="Bot is running!")
-
+# --- ЗАПУСК ВЕБ-СЕРВЕРА И БОТА СИНХРОННО ---
 async def main():
-    app = web.Application()
-    app.router.add_get('/', handle_ping)
-    runner = web.AppRunner(app)
-    await runner.setup()
     port = int(os.getenv("PORT", 10000))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-
-    print(f"Serveriin portii {port} irratti ka'eera...")
-    await dp.start_polling(bot)
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+    server = uvicorn.Server(config)
+    
+    await asyncio.gather(
+        server.serve(),
+        dp.start_polling(bot)
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())
