@@ -124,26 +124,40 @@ async def generate_custom_image(message: types.Message):
     user_prompt = message.text
     status_msg = await message.answer("📊 Генерирую схему инфографики через Gemini AI...")
 
-    # Актуальные рабочие имена моделей
-    models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash"]
+    MODEL_NAME = "gemini-3.6-flash"
     response = None
     last_error = ""
 
-    for model_name in models_to_try:
+    # Цикл авто-повторов с растущей задержкой (до 5 попыток)
+    max_retries = 5
+    delay = 1.5  # начальная задержка в секундах
+
+    for attempt in range(1, max_retries + 1):
         try:
             response = ai_client.models.generate_content(
-                model=model_name,
+                model=MODEL_NAME,
                 contents=f"{SYSTEM_PROMPT}\n\nЗапрос пользователя: {user_prompt}"
             )
             if response and response.text:
                 break
         except Exception as e:
             last_error = str(e)
-            await asyncio.sleep(1)
-            continue
+            
+            # Если это последняя попытка — выходим
+            if attempt == max_retries:
+                break
+
+            # Уведомляем пользователя, если сервер загружен и мы ждем
+            if "503" in last_error or "UNAVAILABLE" in last_error or "high demand" in last_error.lower():
+                await status_msg.edit_text(
+                    f"⏳ Сервер Gemini загружен. Попытка {attempt}/{max_retries}... Ждем {int(delay)} сек."
+                )
+
+            await asyncio.sleep(delay)
+            delay *= 2  # Увеличиваем время ожидания в 2 раза на каждом шаге
 
     if not response or not response.text:
-        await status_msg.edit_text(f"⏳ Ошибка API: {last_error[:200]}")
+        await status_msg.edit_text(f"❌ Не удалось получить ответ после {max_retries} попыток.\nОшибка: {last_error[:150]}")
         return
 
     try:
@@ -157,7 +171,7 @@ async def generate_custom_image(message: types.Message):
         await message.answer_photo(photo, caption=f"Инфографика: *{user_prompt}*")
 
     except Exception as e:
-        await status_msg.edit_text(f"❌ Ошибка обработки ответа: {str(e)}")
+        await status_msg.edit_text(f"❌ Ошибка форматирования ответа: {str(e)}")
 
 
 # --- Веб-сервер заглушка для Render ---
