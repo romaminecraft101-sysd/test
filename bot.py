@@ -164,7 +164,7 @@ async def generate_custom_image(message: types.Message):
     try:
         completion = await asyncio.to_thread(
             ai_client.chat.completions.create,
-            model="deepseek/deepseek-r1:free",
+            model="google/gemini-2.0-flash-lite-001:free",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": f"Создай инфографику на тему: {user_prompt}"}
