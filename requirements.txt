@@ -1,4 +1,5 @@
-aiogram>=3.0.0
-Pillow>=10.0.0
-openai>=1.0.0
-aiohttp
+aiogram
+google-genai
+requests
+fastapi
+uvicorn
