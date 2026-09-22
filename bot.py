@@ -124,30 +124,30 @@ async def generate_custom_image(message: types.Message):
     user_prompt = message.text
     status_msg = await message.answer("📊 Генерирую схему инфографики через Gemini AI...")
 
-    # Перебор моделей на случай высокой нагрузки (ошибка 503)
-    models_to_try = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+    # Только существующие модели в Google AI Studio
+    models_to_try = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
     response = None
+    last_error = ""
 
     for model_name in models_to_try:
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 response = ai_client.models.generate_content(
                     model=model_name,
                     contents=f"{SYSTEM_PROMPT}\n\nЗапрос пользователя: {user_prompt}"
                 )
-                if response:
+                if response and response.text:
                     break
             except Exception as e:
-                if "503" in str(e) or "UNAVAILABLE" in str(e):
-                    await asyncio.sleep(2)
-                    continue
-                else:
-                    break
-        if response:
+                last_error = str(e)
+                # Ждем перед повторной попыткой, чтобы избежать лимитов
+                await asyncio.sleep(2)
+                continue
+        if response and response.text:
             break
 
-    if not response:
-        await status_msg.edit_text("⏳ Серверы Gemini сейчас перегружены. Попробуйте еще раз через минуту!")
+    if not response or not response.text:
+        await status_msg.edit_text(f"⏳ Не удалось получить ответ от Gemini. Ошибка: {last_error[:150]}")
         return
 
     try:
@@ -161,7 +161,7 @@ async def generate_custom_image(message: types.Message):
         await message.answer_photo(photo, caption=f"Инфографика: *{user_prompt}*")
 
     except Exception as e:
-        await status_msg.edit_text(f"❌ Ошибка обработки ответа: {str(e)}")
+        await status_msg.edit_text(f"❌ Ошибка обработки ответа от AI: {str(e)}")
 
 
 # --- Веб-сервер заглушка для Render ---
