@@ -1,65 +1,78 @@
 import os
 import io
+import json
 import asyncio
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart, Command
+from aiohttp import web
+
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import CommandStart
 from aiogram.types import BufferedInputFile
 
-# Библиотеки для графики и PDF
 from PIL import Image, ImageDraw, ImageFont
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
-from reportlab.lib import colors
+from google import genai
 
-# Токен берется из переменных окружения (Environment Variables) на Render
+# Инициализация бота и Gemini API из переменных окружения Render
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
+# --- Системный промпт для Gemini ---
+SYSTEM_PROMPT = """
+Ты — AI-дизайнер. Твоя задача — составить JSON-конфигурацию для создания баннера/картинки (800x600 px) на основе запроса пользователя.
 
-# --- 1. Генерация PNG изображения (Pillow) ---
-def create_png_image(text_content: str) -> bytes:
-    # Создаем холст 800x600 px (RGB, светлый фон)
-    img = Image.new("RGB", (800, 600), color="#f0f0f0")
+Верни ТОЛЬКО валидный JSON со следующей структурой (без маркдауна и разметки ```json):
+{
+  "bg_color": "HEX цвет фона (например #ffffff)",
+  "shapes": [
+    {
+      "type": "rectangle" или "circle",
+      "coords": [x1, y1, x2, y2] (в пределах 800x600),
+      "color": "HEX цвет фигуры"
+    }
+  ],
+  "texts": [
+    {
+      "text": "Текст для отображения (кратко)",
+      "x": 220,
+      "y": 140,
+      "color": "HEX цвет текста"
+    }
+  ]
+}
+Создавай красивую композицию из 2-4 фигур и 1-3 текстов, сочетая гармоничные цвета.
+"""
+
+# --- Функция отрисовки PNG по JSON-конфигурации ---
+def draw_image_from_config(config: dict) -> bytes:
+    img = Image.new("RGB", (800, 600), color=config.get("bg_color", "#ffffff"))
     draw = ImageDraw.Draw(img)
 
-    # Рисуем рамку и круг
-    draw.rectangle([50, 50, 750, 550], outline="#007acc", width=5)
-    draw.ellipse([100, 100, 200, 200], fill="#ff4757")
+    # 1. Рисуем фигуры
+    for shape in config.get("shapes", []):
+        stype = shape.get("type")
+        coords = shape.get("coords", [0, 0, 100, 100])
+        color = shape.get("color", "#000000")
 
-    # Добавляем текст
-    # Для стандартного шрифта можно использовать default, или закрузить свой .ttf файл
+        if stype == "rectangle":
+            draw.rectangle(coords, fill=color)
+        elif stype == "circle":
+            draw.ellipse(coords, fill=color)
+
+    # 2. Рисуем текст
     font = ImageFont.load_default()
-    draw.text((220, 140), text_content or "Привет из Python!", fill="#2f3542", font=font)
+    for text_info in config.get("texts", []):
+        text = text_info.get("text", "")
+        x = text_info.get("x", 50)
+        y = text_info.get("y", 50)
+        color = text_info.get("color", "#000000")
+        
+        draw.text((x, y), text, fill=color, font=font)
 
-    # Сохраняем в байтовый поток (Buffer)
     buffer = io.BytesIO()
     img.save(buffer, format="PNG")
-    buffer.seek(0)
-    return buffer.getvalue()
-
-
-# --- 2. Генерация PDF документа (ReportLab) ---
-def create_pdf_document(text_content: str) -> bytes:
-    buffer = io.BytesIO()
-    pdf = canvas.Canvas(buffer, pagesize=letter)
-
-    # Заголовок
-    pdf.setFont("Helvetica-Bold", 24)
-    pdf.setFillColor(colors.HexColor("#007acc"))
-    pdf.drawString(100, 700, "Generated PDF Document")
-
-    # Прямоугольник
-    pdf.setFillColor(colors.HexColor("#eccc68"))
-    pdf.setStrokeColor(colors.HexColor("#ffa502"))
-    pdf.rect(100, 450, 400, 200, fill=1, stroke=1)
-
-    # Текст внутри
-    pdf.setFillColor(colors.HexColor("#2f3542"))
-    pdf.setFont("Helvetica", 14)
-    pdf.drawString(120, 550, text_content or "Your text goes here")
-
-    pdf.save()
     buffer.seek(0)
     return buffer.getvalue()
 
@@ -67,30 +80,44 @@ def create_pdf_document(text_content: str) -> bytes:
 # --- Хэндлеры бота ---
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
-    await message.answer("Привет! Напиши /png для картинки или /pdf для документа.")
+    await message.answer(
+        "Привет! Напиши мне тему или описание картинки, и я сгенерирую подходящий макет из фигур и текста.\n\n"
+        "Например: *'Реклама скидок в магазине одежды'* или *'Открытка с днём рождения'*"
+    )
+
+@dp.message(F.text)
+async def generate_custom_image(message: types.Message):
+    user_prompt = message.text
+    status_msg = await message.answer("🎨 Продумываю дизайн с помощью Gemini AI...")
+
+    try:
+        # Запрос к Gemini
+        response = ai_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=f"{SYSTEM_PROMPT}\n\nЗапрос пользователя: {user_prompt}"
+        )
+        
+        # Очищаем ответ от возможной разметки маркдауна
+        raw_json = response.text.replace("```json", "").replace("```", "").strip()
+        config = json.loads(raw_json)
+
+        # Отрисовываем картинку
+        png_bytes = draw_image_from_config(config)
+        photo = BufferedInputFile(png_bytes, filename="design.png")
+
+        await status_msg.delete()
+        await message.answer_photo(photo, caption=f"Вот ваш макет на тему: *{user_prompt}*")
+
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Ошибка при генерации дизайна: {str(e)}")
 
 
-@dp.message(Command("png"))
-async def png_handler(message: types.Message):
-    png_bytes = create_png_image("Сгенерировано на Python!")
-    photo = BufferedInputFile(png_bytes, filename="image.png")
-    await message.answer_photo(photo, caption="Вот ваше PNG изображение")
-
-
-@dp.message(Command("pdf"))
-async def pdf_handler(message: types.Message):
-    pdf_bytes = create_pdf_document("Документ создан без ошибок!")
-    document = BufferedInputFile(pdf_bytes, filename="document.pdf")
-    await message.answer_document(document, caption="Вот ваш PDF документ")
-
-
-from aiohttp import web
-
+# --- Веб-сервер заглушка для Render ---
 async def handle_ping(request):
-    return web.Response(text="Bot is alive!")
+    return web.Response(text="Bot with web-port is running fine!")
 
 async def main():
-    # Запускаем простейший веб-сервер для Render на порту 10000
+    # Создаем и запускаем HTTP-сервер на порту, который просит Render
     app = web.Application()
     app.router.add_get('/', handle_ping)
     runner = web.AppRunner(app)
@@ -99,7 +126,7 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
-    print("Бот и веб-сервер запущены...")
+    print("Бот и заглушка сервера запущены...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
