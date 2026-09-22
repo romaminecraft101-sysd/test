@@ -99,7 +99,7 @@ async def generate_custom_image(message: types.Message):
     try:
         # Запрос к Gemini
         response = ai_client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.6-flash",
             contents=f"{SYSTEM_PROMPT}\n\nЗапрос пользователя: {user_prompt}"
         )
         
