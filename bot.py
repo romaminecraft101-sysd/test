@@ -12,18 +12,20 @@ from aiogram.types import BufferedInputFile
 from PIL import Image, ImageDraw, ImageFont
 from openai import OpenAI
 
+# Redder irraa geeddaramtoota naannoo (Environment Variables) fudhachuu
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Клиент OpenAI, настроенный под OpenRouter
-ai_client = OpenAI(
+# OpenRouter client qopheessuu
+client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_API_KEY,
 ) if OPENROUTER_API_KEY else None
 
+# Jechoota Qubee Sirriitti Mul'isuuf (Font)
 FONT_PATH = "Roboto-Regular.ttf"
 
 def get_font(size: int):
@@ -32,112 +34,57 @@ def get_font(size: int):
     except Exception:
         return ImageFont.load_default()
 
+# --- Ajaja Ajajamu (System Prompt) ---
 SYSTEM_PROMPT = """
-Ты — арт-директор и ведущий UI/UX дизайнер. Твоя задача — составить богатую, эстетичную JSON-конфигурацию премиальной инфографики (1200x900 px) по запросу пользователя.
+You are a UI/UX designer. Output ONLY valid JSON (without markdown ```json wrappers) for an image config (1000x800 px).
 
-Верни ТОЛЬКО валидный JSON (без маркдауна, текста вокруг и разметки ```json):
+JSON structure:
 {
-  "gradient_bg": {
-    "start_color": "#0f172a",
-    "end_color": "#1e1b4b"
-  },
-  "cards": [
-    {
-      "coords": [50, 160, 380, 480],
-      "bg_color": "#1e293b",
-      "border_color": "#3b82f6",
-      "radius": 16,
-      "border_width": 2
-    }
-  ],
+  "bg_color": "#HEX",
   "shapes": [
-    {
-      "type": "circle" | "line" | "badge",
-      "coords": [x1, y1, x2, y2],
-      "color": "#6366f1",
-      "width": 3
-    }
+    {"type": "rectangle" | "circle" | "line", "coords": [x1, y1, x2, y2], "color": "#HEX", "width": 2}
   ],
   "texts": [
-    {
-      "text": "Текст блока",
-      "x": 70,
-      "y": 180,
-      "color": "#ffffff",
-      "size": 24,
-      "max_width": 26
-    }
+    {"text": "Text in Russian", "x": 100, "y": 100, "color": "#HEX", "size": 24, "max_width": 30}
   ]
 }
-
-Правила верстки:
-1. Используй стильную темную тему (Slate, Indigo, Dark Blue).
-2. Наверху выдели 1 КРУПНЫЙ Главный Заголовок (size: 36, y: 50).
-3. Размести 4-6 структурированных блоков-карточек (cards) с контентом.
-4. Добавь соединительные линии (type: "line") для наглядности.
 """
 
-def create_gradient(width: int, height: int, start_color: str, end_color: str) -> Image.Image:
-    base = Image.new("RGB", (width, height), start_color)
-    top = Image.new("RGB", (width, height), end_color)
-    mask = Image.new("L", (width, height))
-    
-    for y in range(height):
-        alpha = int(255 * (y / height))
-        for x in range(width):
-            mask.putpixel((x, y), alpha)
-            
-    base.paste(top, (0, 0), mask)
-    return base
-
-def draw_advanced_infographic(config: dict) -> bytes:
-    width, height = 1200, 900
-    
-    gbg = config.get("gradient_bg", {})
-    img = create_gradient(
-        width, height, 
-        gbg.get("start_color", "#0f172a"), 
-        gbg.get("end_color", "#1e1b4b")
-    )
+# --- PNG Fakkii Uumuu ---
+def draw_image_from_config(config: dict) -> bytes:
+    img = Image.new("RGB", (1000, 800), color=config.get("bg_color", "#0b0d17"))
     draw = ImageDraw.Draw(img)
 
-    for card in config.get("cards", []):
-        coords = card.get("coords", [50, 50, 300, 200])
-        bg_col = card.get("bg_color", "#1e293b")
-        border_col = card.get("border_color", "#3b82f6")
-        radius = card.get("radius", 14)
-        b_width = card.get("border_width", 2)
-
-        draw.rounded_rectangle(coords, radius=radius, fill=bg_col, outline=border_col, width=b_width)
-
+    # 1. Bifa (Shapes) fakkessuu
     for shape in config.get("shapes", []):
         stype = shape.get("type")
-        coords = shape.get("coords", [0, 0, 50, 50])
-        color = shape.get("color", "#6366f1")
-        w = shape.get("width", 2)
+        coords = shape.get("coords", [0, 0, 100, 100])
+        color = shape.get("color", "#ffffff")
+        width = shape.get("width", 2)
 
-        if stype == "circle":
+        if stype == "rectangle":
+            draw.rectangle(coords, fill=color)
+        elif stype == "circle":
             draw.ellipse(coords, fill=color)
         elif stype == "line":
-            draw.line(coords, fill=color, width=w)
-        elif stype == "badge":
-            draw.rounded_rectangle(coords, radius=6, fill=color)
+            draw.line(coords, fill=color, width=width)
 
+    # 2. Barruu (Text) barreessuu
     for text_info in config.get("texts", []):
         raw_text = text_info.get("text", "")
         x = text_info.get("x", 50)
         y = text_info.get("y", 50)
         color = text_info.get("color", "#ffffff")
         size = text_info.get("size", 20)
-        max_w = text_info.get("max_width", 30)
+        max_width = text_info.get("max_width", 35)
 
         font = get_font(size)
-        wrapped_lines = textwrap.wrap(raw_text, width=max_w)
+        wrapped_lines = textwrap.wrap(raw_text, width=max_width)
         
         current_y = y
         for line in wrapped_lines:
             draw.text((x, current_y), line, fill=color, font=font)
-            current_y += size + 6
+            current_y += size + 4
 
     buffer = io.BytesIO()
     img.save(buffer, format="PNG")
@@ -145,50 +92,76 @@ def draw_advanced_infographic(config: dict) -> bytes:
     return buffer.getvalue()
 
 
+# --- Ergaa Telegram ---
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
     await message.answer(
-        "👋 Привет! Я создаю инфографику и графические схемы.\n\n"
-        "Напиши тему, например: *'История и эволюция языков программирования'*"
+        "Akkam! Mata duree fakkii maaliitu siif uumamu barbaadda?\n\n"
+        "Fakkeenyaaf: *'Черная дыра'* ykn *'Кофейня'*"
     )
 
 @dp.message(F.text)
 async def generate_custom_image(message: types.Message):
-    if not ai_client:
-        await message.answer("❌ Ошибка: Переменная OPENROUTER_API_KEY не задана на Render!")
+    if not client:
+        await message.answer("❌ Owwaannaa: OPENROUTER_API_KEY Render irratti hin saagalle!")
         return
 
     user_prompt = message.text
-    status_msg = await message.answer("🎨 Проектирую макет схемы...")
+    status_msg = await message.answer("📊 OpenRouter AI fayyadamnee fakkii qopheessaa jirra...")
+
+    # Tarree modelliwwan bilisaa (Free models)
+    FREE_MODELS = [
+        "google/gemini-2.0-flash-exp:free",
+        "google/gemini-flash-1.5-8b:free",
+        "meta-llama/llama-3.1-8b-instruct:free",
+        "qwen/qwen-2.5-7b-instruct:free",
+        "mistralai/mistral-7b-instruct:free"
+    ]
+
+    response = None
+    last_error = ""
+
+    # Tokko tokkoon yaaluu
+    for model_name in FREE_MODELS:
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt}
+                ]
+            )
+            if response and response.choices:
+                print(f"Modelliin hojjete: {model_name}")
+                break
+        except Exception as e:
+            last_error = str(e)
+            print(f"Model {model_name} hin hojjenne, isa itti aanutti darbina...")
+            await asyncio.sleep(1)
+            continue
+
+    if not response or not response.choices:
+        await status_msg.edit_text(f"❌ Dogoggora: Modelliin bilisaa tajaajila ala ta'aniiru. {last_error[:150]}")
+        return
 
     try:
-        completion = await asyncio.to_thread(
-            ai_client.chat.completions.create,
-            model="google/gemini-2.0-flash-lite-001:free",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"Создай инфографику на тему: {user_prompt}"}
-            ],
-            temperature=0.2
-        )
-
-        raw_json = completion.choices[0].message.content
-        # Очистка JSON от случайных тегов
-        raw_json = raw_json.replace("```json", "").replace("```", "").strip()
+        raw_content = response.choices[0].message.content
+        raw_json = raw_content.replace("```json", "").replace("```", "").strip()
         config = json.loads(raw_json)
 
-        png_bytes = await asyncio.to_thread(draw_advanced_infographic, config)
+        png_bytes = draw_image_from_config(config)
         photo = BufferedInputFile(png_bytes, filename="infographic.png")
 
         await status_msg.delete()
-        await message.answer_photo(photo, caption=f"Инфографика: *{user_prompt}*")
+        await message.answer_photo(photo, caption=f"Fakkii uumame: *{user_prompt}*")
 
     except Exception as e:
-        await status_msg.edit_text(f"❌ Ошибка генерации: {str(e)}")
+        await status_msg.edit_text(f"❌ Dogoggora JSON: {str(e)}")
 
 
+# --- Server Render.com Webhook/Ping ---
 async def handle_ping(request):
-    return web.Response(text="Bot is running smoothly!")
+    return web.Response(text="Bot is running!")
 
 async def main():
     app = web.Application()
@@ -199,6 +172,7 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
+    print(f"Serveriin portii {port} irratti ka'eera...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
