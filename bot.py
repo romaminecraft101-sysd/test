@@ -12,25 +12,27 @@ from aiogram.types import BufferedInputFile
 from PIL import Image, ImageDraw, ImageFont
 from google import genai
 
+# Получение ключей из переменных окружения Render
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# Инициализация клиента Gemini
 ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-# Загрузка шрифтов с кириллицей разных размеров
+# Функция загрузки кириллического шрифта
 FONT_PATH = "Roboto-Regular.ttf"
 
-def get_font(size):
+def get_font(size: int):
     try:
         return ImageFont.truetype(FONT_PATH, size)
     except Exception:
-        print("Предупреждение: Шрифт не найден, используется стандартный")
+        print("Предупреждение: Шрифт Roboto-Regular.ttf не найден, используется стандартный.")
         return ImageFont.load_default()
 
-# --- Улучшенный промпт для инфографики ---
+# --- Системный промпт для инфографики ---
 SYSTEM_PROMPT = """
 Ты — профессиональный UI/UX дизайнер и создатель инфографики. Твоя задача — составить подробную JSON-конфигурацию макета (1000x800 px) на основе запроса пользователя.
 
@@ -42,7 +44,7 @@ SYSTEM_PROMPT = """
       "type": "rectangle" | "circle" | "line",
       "coords": [x1, y1, x2, y2],
       "color": "HEX цвет",
-      "width": 2 (для линий)
+      "width": 2
     }
   ],
   "texts": [
@@ -51,8 +53,8 @@ SYSTEM_PROMPT = """
       "x": 100,
       "y": 100,
       "color": "HEX цвет",
-      "size": 24 (размер: 32 для заголовков, 18-22 для подписей),
-      "max_width": 30 (символов в строке для автопереноса)
+      "size": 24,
+      "max_width": 30
     }
   ]
 }
@@ -63,9 +65,8 @@ SYSTEM_PROMPT = """
 3. Обязательно добавляй главный заголовок вверху макета (size: 32-36).
 """
 
-# --- Функция отрисовки инфографики ---
+# --- Функция отрисовки PNG по JSON ---
 def draw_image_from_config(config: dict) -> bytes:
-    # Увеличиваем разрешение до 1000x800 для более детальной схемы
     img = Image.new("RGB", (1000, 800), color=config.get("bg_color", "#0b0d17"))
     draw = ImageDraw.Draw(img)
 
@@ -83,7 +84,7 @@ def draw_image_from_config(config: dict) -> bytes:
         elif stype == "line":
             draw.line(coords, fill=color, width=width)
 
-    # 2. Рисуем текст с переносами и шрифтом
+    # 2. Рисуем текст с переносами
     for text_info in config.get("texts", []):
         raw_text = text_info.get("text", "")
         x = text_info.get("x", 50)
@@ -93,8 +94,6 @@ def draw_image_from_config(config: dict) -> bytes:
         max_width = text_info.get("max_width", 35)
 
         font = get_font(size)
-
-        # Автоперенос длинных строк
         wrapped_lines = textwrap.wrap(raw_text, width=max_width)
         
         current_y = y
@@ -108,7 +107,7 @@ def draw_image_from_config(config: dict) -> bytes:
     return buffer.getvalue()
 
 
-# --- Обработчики команд ---
+# --- Обработчики Telegram ---
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
     await message.answer(
@@ -119,18 +118,39 @@ async def start_handler(message: types.Message):
 @dp.message(F.text)
 async def generate_custom_image(message: types.Message):
     if not ai_client:
-        await message.answer("❌ Ошибка: Ключ GEMINI_API_KEY не задан!")
+        await message.answer("❌ Ошибка: Ключ GEMINI_API_KEY не задан в настройках Render!")
         return
 
     user_prompt = message.text
     status_msg = await message.answer("📊 Генерирую схему инфографики через Gemini AI...")
 
+    # Перебор моделей на случай высокой нагрузки (ошибка 503)
+    models_to_try = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+    response = None
+
+    for model_name in models_to_try:
+        for attempt in range(3):
+            try:
+                response = ai_client.models.generate_content(
+                    model=model_name,
+                    contents=f"{SYSTEM_PROMPT}\n\nЗапрос пользователя: {user_prompt}"
+                )
+                if response:
+                    break
+            except Exception as e:
+                if "503" in str(e) or "UNAVAILABLE" in str(e):
+                    await asyncio.sleep(2)
+                    continue
+                else:
+                    break
+        if response:
+            break
+
+    if not response:
+        await status_msg.edit_text("⏳ Серверы Gemini сейчас перегружены. Попробуйте еще раз через минуту!")
+        return
+
     try:
-        response = ai_client.models.generate_content(
-            model="gemini-3.6-flash",
-            contents=f"{SYSTEM_PROMPT}\n\nЗапрос пользователя: {user_prompt}"
-        )
-        
         raw_json = response.text.replace("```json", "").replace("```", "").strip()
         config = json.loads(raw_json)
 
@@ -141,10 +161,10 @@ async def generate_custom_image(message: types.Message):
         await message.answer_photo(photo, caption=f"Инфографика: *{user_prompt}*")
 
     except Exception as e:
-        await status_msg.edit_text(f"❌ Ошибка генерации: {str(e)}")
+        await status_msg.edit_text(f"❌ Ошибка обработки ответа: {str(e)}")
 
 
-# --- Заглушка веб-сервера ---
+# --- Веб-сервер заглушка для Render ---
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
 
@@ -157,6 +177,7 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
+    print(f"Заглушка сервера запущена на порту {port}...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
