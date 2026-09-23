@@ -8,28 +8,30 @@ from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from google import genai
 
 from fastapi import FastAPI
 import uvicorn
 
+from huggingface_hub import InferenceClient
+
 # --- НАСТРОЙКИ ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8916069792:AAHJYqH3NL42DpW4o-yA3vyN9B4gnuef8DI").strip()
 
-# Список ключей Gemini
-GEMINI_KEYS = [
-    "AQ.Ab8RN6Lm1ouWvN0dozlZ2JMeQxzHYoRJfAKe8XdrG6NppLGd1Q",
-    "AQ.Ab8RN6Lyunpjqo_qcbckjnHj0DErBBwbSsk0RHAvcg77Mgi1BQ",
-    "AQ.Ab8RN6Lm1ePrmlKDffIqjRVuALOfPgPdzrhtmkjBS0diyEQudA"
-]
+# Твой API токен Hugging Face (получить на huggingface.co -> Settings -> Access Tokens)
+HF_TOKEN = os.getenv("HF_TOKEN", "hf_ТВОЙ_КЛЮЧ_ЗДЕСЬ").strip()
 
-# Актуальные названия моделей для SDK google-genai
-MODELS_TO_TRY = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
+# Модель Qwen 2.5 Coder отлично подходит для генерации разметки Graphviz и JSON
+# Примечание: Для использования этой модели может потребоваться согласие с условиями на странице модели на HF.
+HF_MODEL_NAME = "Qwen/Qwen2.5-Coder-32B-Instruct" 
 
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
 dp = Dispatcher()
+
+# Инициализация клиента Hugging Face
+# Если HF_TOKEN не задан или некорректен, InferenceClient будет работать без авторизации (с ограничениями)
+hf_client = InferenceClient(model=HF_MODEL_NAME, token=HF_TOKEN if HF_TOKEN.startswith("hf_") else None)
 
 # --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 app = FastAPI()
@@ -37,27 +39,41 @@ app = FastAPI()
 @app.get("/")
 @app.get("/health")
 async def health():
-    return {"status": "ok", "bot": "AI Infographic Generator"}
+    return {"status": "ok", "bot": "AI Infographic Generator (HuggingFace)"}
 
-# --- ФУНКЦИЯ ДЛЯ БЕЗОПАСНОГО ВЫЗОВА GEMINI С РОТАЦИЕЙ КЛЮЧЕЙ И МОДЕЛЕЙ ---
-async def generate_gemini_safe(prompt):
-    for key in GEMINI_KEYS:
-        # В новом SDK используется http_options вместо client_options
-        client = genai.Client(api_key=key, http_options={'api_version': 'v1alpha'})
-        for model_name in MODELS_TO_TRY:
-            try:
-                res = await client.aio.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config={'response_mime_type': 'application/json'}
-                )
-                if res and res.text:
-                    logging.info(f"✅ Успешный ответ от модели: {model_name}")
-                    return res.text
-            except Exception as e:
-                logging.warning(f"Ошибка с моделью {model_name} (ключ ...{key[-5:]}): {e}. Пробуем дальше...")
-                await asyncio.sleep(0.5)
-    return None
+# --- ФУНКЦИЯ ВЫЗОВА HUGGING FACE ---
+async def generate_hf_safe(prompt):
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant that strictly responds in JSON format."},
+        {"role": "user", "content": prompt}
+    ]
+    try:
+        # Запускаем синхронный запрос к HuggingFace в асинхронном потоке
+        # asyncio.to_thread позволяет выполнять синхронные функции без блокировки основного цикла
+        response = await asyncio.to_thread(
+            hf_client.chat_completion,
+            messages=messages,
+            max_tokens=1000, # Максимальное количество токенов в ответе
+            temperature=0.2, # Низкий temperature для более детерминированных ответов (код/JSON)
+            do_sample=True,  # Включено для использования temperature
+            return_full_text=False # Возвращает только сгенерированный текст, без промпта
+        )
+        
+        content = response.choices[0].message.content.strip()
+        
+        # Очистка от возможных markdown-тегов ```json ... ```
+        if content.startswith("```"):
+            lines = content.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:] # Удаляем первую строку (```json)
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1] # Удаляем последнюю строку (```)
+            content = "\n".join(lines).strip()
+            
+        return content
+    except Exception as e:
+        logging.error(f"Ошибка вызова Hugging Face API с моделью {HF_MODEL_NAME}: {e}")
+        return None
 
 # --- ГЕНЕРАЦИЯ PDF-СХЕМЫ ЧЕРЕЗ QuickChart ---
 def get_quickchart_pdf(dot_code, user_id):
@@ -67,7 +83,7 @@ def get_quickchart_pdf(dot_code, user_id):
     
     try:
         response = requests.get(url, timeout=30)
-        response.raise_for_status()
+        response.raise_for_status() # Вызовет исключение для ошибок HTTP (4xx или 5xx)
     except requests.exceptions.RequestException as e:
         logging.error(f"Ошибка при запросе к QuickChart: {e}")
         return None
@@ -81,13 +97,15 @@ def get_quickchart_pdf(dot_code, user_id):
 
 @dp.message(Command("start"))
 async def cmd_start(msg: types.Message):
-    await msg.answer("🤖 **Привет! Я бот для создания инфографики.**\n\nПросто отправь мне любой текст (тему проекта, описание процесса, список идей), и я создам по нему схему-инфографику в формате PDF.")
+    await msg.answer("🤖 **Привет! Я бот для создания инфографики (на базе Hugging Face).**\n\nПросто отправь мне любой текст (тему проекта, описание процесса, список идей), и я создам по нему схему-инфографику в формате PDF.")
 
 @dp.message(F.text)
 async def handle_user_text(msg: types.Message):
     user_text = msg.text
     status_msg = await msg.answer("⏳ **ИИ анализирует ваш текст и генерирует схему-инфографику...**")
 
+    # Промпт для Hugging Face: Сгенерировать Graphviz (DOT) код на основе произвольного текста
+    # Строго просим вернуть JSON.
     prompt = f"""
     На основе следующего текста:
     ---
@@ -101,16 +119,17 @@ async def handle_user_text(msg: types.Message):
     4. Отрази 5-7 ключевых идей, этапов или связей из текста.
     5. Текст внутри блоков должен быть на РУССКОМ языке, кратким и понятным.
     
-    Верни ответ строго в формате JSON с одним ключом 'dot_code':
+    Верни ответ СТРОГО в формате валидного JSON с одним ключом 'dot_code'.
+    Пример ответа:
     {{
-      "dot_code": "код_graphviz_здесь"
+      "dot_code": "digraph G {{\\n  rankdir=TB;\\n  node [shape=box, style=\"rounded,filled\", fillcolor=\"lightblue\"];\\n  \\\"Начало\\\" -> \\\"Середина\\\";\\n  \\\"Середина\\\" -> \\\"Конец\\\";\\n}}"
     }}
     """
 
-    ai_res = await generate_gemini_safe(prompt)
+    ai_res = await generate_hf_safe(prompt)
 
     if not ai_res:
-        await status_msg.edit_text("❌ Сервер ИИ временно перегружен или не смог обработать ваш запрос. Попробуйте еще раз через минуту.")
+        await status_msg.edit_text("❌ ИИ-сервер временно не отвечает или не смог обработать ваш запрос. Попробуйте еще раз через минуту.")
         return
 
     try:
