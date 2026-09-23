@@ -12,20 +12,17 @@ from aiogram.enums import ParseMode
 from fastapi import FastAPI
 import uvicorn
 
-from huggingface_hub import InferenceClient
-
 # --- НАСТРОЙКИ ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8916069792:AAHJYqH3NL42DpW4o-yA3vyN9B4gnuef8DI").strip()
 HF_TOKEN = os.getenv("HF_TOKEN", "hf_ТВОЙ_КЛЮЧ_ЗДЕСЬ").strip()
 
-HF_MODEL_NAME = "Qwen/Qwen2.5-Coder-32B-Instruct" 
+# Используем быструю и стабильную модель Qwen через Inference API
+HF_MODEL_URL = "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-Coder-32B-Instruct"
 
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
 dp = Dispatcher()
-
-hf_client = InferenceClient(model=HF_MODEL_NAME, token=HF_TOKEN if HF_TOKEN.startswith("hf_") else None)
 
 # --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 app = FastAPI()
@@ -33,24 +30,47 @@ app = FastAPI()
 @app.get("/")
 @app.get("/health")
 async def health():
-    return {"status": "ok", "bot": "AI Infographic Generator (HuggingFace)"}
+    return {"status": "ok", "bot": "AI Infographic Generator (HuggingFace API)"}
 
-# --- ФУНКЦИЯ ВЫЗОВА HUGGING FACE ---
+# --- ФУНКЦИЯ ВЫЗОВА HUGGING FACE ЧЕРЕЗ ЧИСТЫЙ REQUESTS (С UTF-8) ---
 async def generate_hf_safe(prompt):
-    messages = [
-        {"role": "system", "content": "You are a helpful assistant that strictly responds in JSON format."},
-        {"role": "user", "content": prompt}
-    ]
+    headers = {
+        "Authorization": f"Bearer {HF_TOKEN}",
+        "Content-Type": "application/json; charset=utf-8"
+    }
+    
+    payload = {
+        "inputs": f"<|im_start|>system\nYou are a helpful assistant that strictly responds in JSON format.<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n",
+        "parameters": {
+            "max_new_tokens": 1000,
+            "temperature": 0.2,
+            "return_full_text": False
+        }
+    }
+
+    def send_request():
+        # Используем requests.post с явным указанием кодировки utf-8
+        response = requests.post(HF_MODEL_URL, headers=headers, json=payload, timeout=60)
+        return response
+
     try:
-        response = await asyncio.to_thread(
-            hf_client.chat_completion,
-            messages=messages,
-            max_tokens=1000,
-            temperature=0.2
-        )
+        response = await asyncio.to_thread(send_request)
         
-        content = response.choices[0].message.content.strip()
+        if response.status_code != 200:
+            logging.error(f"HF API Error [{response.status_code}]: {response.text}")
+            return None
+
+        res_json = response.json()
         
+        # Обработка ответа от Serverless API
+        if isinstance(res_json, list) and len(res_json) > 0:
+            content = res_json[0].get("generated_text", "").strip()
+        elif isinstance(res_json, dict):
+            content = res_json.get("generated_text", "").strip()
+        else:
+            content = str(res_json).strip()
+
+        # Очистка от markdown ```json ... ```
         if content.startswith("```"):
             lines = content.splitlines()
             if lines[0].startswith("```"):
@@ -61,7 +81,7 @@ async def generate_hf_safe(prompt):
             
         return content
     except Exception as e:
-        logging.error(f"Ошибка вызова Hugging Face API с моделью {HF_MODEL_NAME}: {e}")
+        logging.error(f"Ошибка вызова Hugging Face API: {e}")
         return None
 
 # --- ГЕНЕРАЦИЯ PDF-СХЕМЫ ЧЕРЕЗ QuickChart ---
@@ -73,7 +93,7 @@ def get_quickchart_pdf(dot_code, user_id):
     try:
         response = requests.get(url, timeout=30)
         response.raise_for_status()
-    except requests.exceptions.RequestException as e:
+    except requests.exceptions.RequestExceptionas e:
         logging.error(f"Ошибка при запросе к QuickChart: {e}")
         return None
 
@@ -116,7 +136,7 @@ async def handle_user_text(msg: types.Message):
     ai_res = await generate_hf_safe(prompt)
 
     if not ai_res:
-        await status_msg.edit_text("❌ ИИ-сервер временно не отвечает или не смог обработать ваш запрос. Попробуйте еще раз через минуту.")
+        await status_msg.edit_text("❌ ИИ-сервер временно не отвечает или модель загружается. Попробуйте еще раз через минуту.")
         return
 
     try:
