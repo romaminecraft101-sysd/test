@@ -93,7 +93,7 @@ def get_quickchart_pdf(dot_code, user_id):
     try:
         response = requests.get(url, timeout=30)
         response.raise_for_status()
-    except requests.exceptions.RequestExceptionas e:
+    except requests.exceptions.RequestException as e:
         logging.error(f"Ошибка при запросе к QuickChart: {e}")
         return None
 
