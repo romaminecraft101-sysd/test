@@ -39,12 +39,12 @@ async def generate_ai_logic(prompt: str):
         "messages": [
             {
                 "role": "system", 
-                "content": "You are an elite infographic and Graphviz DOT architect. You generate visually rich, complex, modern-styled Graphviz diagrams using subgraphs, clusters, gradient-like dark palettes, HTML-like labels, and emoji icons. You output ONLY valid JSON."
+                "content": "You are an elite infographic and Graphviz DOT architect. You output ONLY valid JSON in format {\"dot_code\": \"digraph G { ... }\"}."
             },
             {"role": "user", "content": prompt}
         ],
         "response_format": {"type": "json_object"},
-        "temperature": 0.4,
+        "temperature": 0.3,
         "max_tokens": 2000
     }
     
@@ -67,14 +67,20 @@ async def generate_ai_logic(prompt: str):
 
         content = res_json["choices"][0]["message"]["content"].strip()
         
-        if content.startswith("```"):
+        # Очистка от возможных markdown-тегов ```json ... ```
+        if "```" in content:
             lines = content.splitlines()
-            if lines[0].strip().startswith("```"): lines = lines[1:]
-            if lines and lines[-1].strip().startswith("```"): lines = lines[:-1]
+            lines = [line for line in lines if not line.strip().startswith("```")]
             content = "\n".join(lines).strip()
 
         data = json.loads(content)
-        return data.get("dot_code")
+        dot_code = data.get("dot_code")
+        
+        if not dot_code or not isinstance(dot_code, str):
+            logging.error(f"Invalid dot_code structure: {dot_code}")
+            return None
+            
+        return dot_code.strip()
 
     except Exception as e:
         logging.error(f"General AI Error: {e}")
@@ -91,9 +97,15 @@ def get_infographic_url(dot_code: str, width: int = 1024, height: int = 1024) ->
         '  edge [fontname="Helvetica", fontsize=9, fontcolor="#94A3B8", color="#38BDF8", penwidth=2, arrowhead="vee", arrowsize=1.2]; \n'
     )
     
-    styled_dot = dot_code.replace('digraph G {', style_injection)
-    encoded = urllib.parse.quote(styled_dot.strip())
-    return f"[https://quickchart.io/graphviz?format=png&width=](https://quickchart.io/graphviz?format=png&width=){width}&height={height}&graph={encoded}"
+    if "digraph G {" in dot_code:
+        styled_dot = dot_code.replace("digraph G {", style_injection, 1)
+    elif "digraph {" in dot_code:
+        styled_dot = dot_code.replace("digraph {", style_injection, 1)
+    else:
+        styled_dot = f"{style_injection}\n{dot_code}\n}}"
+
+    encoded = urllib.parse.quote(styled_dot)
+    return f"https://quickchart.io/graphviz?format=png&width={width}&height={height}&graph={encoded}"
 
 @dp.message(Command("start"))
 async def cmd_start(msg: types.Message):
@@ -149,12 +161,13 @@ async def handle_text(msg: types.Message):
         return
 
     img_url = get_infographic_url(dot_code, current_format["width"], current_format["height"])
-    
+    logging.info(f"Generated URL: {img_url[:100]}...")
+
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=45.0, follow_redirects=True) as client:
             img_res = await client.get(img_url)
             if img_res.status_code != 200:
-                raise Exception(f"QuickChart status code {img_res.status_code}")
+                raise Exception(f"QuickChart status code {img_res.status_code}: {img_res.text}")
             image_bytes = img_res.content
 
         document_file = BufferedInputFile(image_bytes, filename="infographic_hd.png")
