@@ -2,4 +2,3 @@ aiogram
 requests
 fastapi
 uvicorn
-huggingface_hub
