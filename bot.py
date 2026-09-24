@@ -19,8 +19,8 @@ HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
 
 OPENROUTER_MODEL = "deepseek/deepseek-chat"
 
-# Используем быстрый и качественный FLUX.1-schnell от Black Forest Labs
-HF_MODEL_URL = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
+# Используем надежный рабочий эндпоинт SDXL или Flux от Hugging Face
+HF_MODEL_URL = "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
@@ -44,19 +44,19 @@ async def generate_prompt_with_llm(user_topic: str) -> str:
         "messages": [
             {
                 "role": "system", 
-                "content": "You are an expert AI art prompt creator specializing in infographics, modern UI diagrams, and futuristic educational posters. Convert user request into a highly detailed English image generation prompt."
+                "content": "You are an expert AI art prompt creator specializing in infographics, modern UI diagrams, and visual educational posters. Convert user request into a detailed English image generation prompt."
             },
             {
                 "role": "user", 
-                "content": f"Create a detailed text-to-image prompt in English for a visual infographic about: '{user_topic}'. Include style notes: clean layout, vector design, high contrast, 3D elements, dark slate blue background, modern typography icons, trending on Dribbble, extremely detailed, 8k resolution."
+                "content": f"Create a concise text-to-image prompt in English for a visual infographic poster about: '{user_topic}'. Style: sleek vector layout, dark background, vivid accents, 3d elements, Dribbble style, highly detailed, 8k resolution."
             }
         ],
         "temperature": 0.6,
-        "max_tokens": 300
+        "max_tokens": 200
     }
     
     try:
-        async with httpx.AsyncClient(timeout=45.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             res = await client.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
             if res.status_code == 200:
                 data = res.json()
@@ -64,15 +64,13 @@ async def generate_prompt_with_llm(user_topic: str) -> str:
     except Exception as e:
         logging.error(f"Error expanding prompt with LLM: {e}")
     
-    # Резервный промпт, если LLM не ответила
-    return f"Modern sleek infographic design about {user_topic}, clean vector layout, dark mode, high quality 8k, detailed icons, modern graphics, 3d rendered elements"
+    return f"Infographic poster design about {user_topic}, modern vector style, dark background, highly detailed"
 
 async def generate_image_huggingface(prompt: str, width: int, height: int) -> bytes:
-    """Отправляет запрос в Hugging Face Inference API и возвращает байты изображения."""
-    headers = {
-        "Authorization": f"Bearer {HF_TOKEN}" if HF_TOKEN else "",
-        "Content-Type": "application/json"
-    }
+    """Отправляет запрос в Hugging Face Inference API с обработкой ошибок сети."""
+    headers = {}
+    if HF_TOKEN:
+        headers["Authorization"] = f"Bearer {HF_TOKEN}"
     
     payload = {
         "inputs": prompt,
@@ -82,14 +80,21 @@ async def generate_image_huggingface(prompt: str, width: int, height: int) -> by
         }
     }
     
-    async with httpx.AsyncClient(timeout=90.0) as client:
-        response = await client.post(HF_MODEL_URL, headers=headers, json=payload)
-        
-        if response.status_code != 200:
-            logging.error(f"HuggingFace Error {response.status_code}: {response.text}")
-            return None
+    try:
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+            response = await client.post(HF_MODEL_URL, headers=headers, json=payload)
             
-        return response.content
+            if response.status_code != 200:
+                logging.error(f"HuggingFace API status {response.status_code}: {response.text}")
+                return None
+                
+            return response.content
+    except httpx.ConnectError as ce:
+        logging.error(f"HuggingFace Connection Error: {ce}")
+        return None
+    except Exception as e:
+        logging.error(f"HuggingFace General Error: {e}")
+        return None
 
 @dp.message(Command("start"))
 async def cmd_start(msg: types.Message):
@@ -121,13 +126,11 @@ async def handle_text(msg: types.Message):
 
     status_msg = await msg.answer("🧠 **Составляю детализированный арт-промпт...**")
 
-    # 1. Генерируем расширенный промпт через DeepSeek
     image_prompt = await generate_prompt_with_llm(msg.text)
     logging.info(f"Generated prompt: {image_prompt}")
 
-    await status_msg.edit_text("🎨 **Нейросеть генерирует изображение (HuggingFace)...**")
+    await status_msg.edit_text("🎨 **Нейросеть генерирует изображение...**")
 
-    # 2. Генерируем картинку через FLUX/HF
     image_bytes = await generate_image_huggingface(
         prompt=image_prompt,
         width=current_format["width"],
@@ -135,17 +138,16 @@ async def handle_text(msg: types.Message):
     )
 
     if not image_bytes:
-        await status_msg.edit_text("❌ Ошибка генерации изображения. Модель временно перегружена или заблокирована. Попробуйте снова.")
+        await status_msg.edit_text("❌ Ошибка генерации. Сервер HuggingFace перегружен или недоступен. Попробуйте еще раз через полминуты.")
         return
 
     try:
-        # 3. Отправляем документ без сжатия
-        document_file = BufferedInputFile(image_bytes, filename="generated_art.png")
+        document_file = BufferedInputFile(image_bytes, filename="generated_infographic.png")
 
         await bot.send_document(
             msg.chat.id, 
             document=document_file, 
-            caption=f"✅ **Ваша арт-инфографика:** {msg.text[:50]}..."
+            caption=f"✅ **Ваша арт-инфографика без сжатия:** {msg.text[:50]}..."
         )
         await status_msg.delete()
     except Exception as e:
