@@ -1,9 +1,9 @@
 import os
 import asyncio
 import urllib.parse
-import urllib.request
 import logging
 import json
+import httpx
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
@@ -48,18 +48,19 @@ async def generate_ai_logic(prompt: str):
         "max_tokens": 2000
     }
     
-    def _make_request():
-        req = urllib.request.Request(
-            "https://openrouter.ai/api/v1/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=90) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-
     try:
-        res_json = await asyncio.to_thread(_make_request)
+        async with httpx.AsyncClient(timeout=90.0) as client:
+            response = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload
+            )
+        
+        if response.status_code != 200:
+            logging.error(f"OpenRouter status: {response.status_code} - {response.text}")
+            return None
+
+        res_json = response.json()
         if not res_json or "choices" not in res_json or not res_json["choices"]:
             logging.error(f"OpenRouter empty choices: {res_json}")
             return None
@@ -150,11 +151,12 @@ async def handle_text(msg: types.Message):
     img_url = get_infographic_url(dot_code, current_format["width"], current_format["height"])
     
     try:
-        def _fetch_image():
-            with urllib.request.urlopen(img_url, timeout=30) as resp:
-                return resp.read()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            img_res = await client.get(img_url)
+            if img_res.status_code != 200:
+                raise Exception(f"QuickChart status code {img_res.status_code}")
+            image_bytes = img_res.content
 
-        image_bytes = await asyncio.to_thread(_fetch_image)
         document_file = BufferedInputFile(image_bytes, filename="infographic_hd.png")
 
         await bot.send_document(
