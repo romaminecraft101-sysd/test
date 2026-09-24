@@ -1,7 +1,7 @@
 import os
 import asyncio
 import logging
-import json
+import urllib.parse
 import httpx
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -15,12 +15,7 @@ import uvicorn
 # --- НАСТРОЙКИ ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
-HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
-
 OPENROUTER_MODEL = "deepseek/deepseek-chat"
-
-# Используем надежный рабочий эндпоинт SDXL или Flux от Hugging Face
-HF_MODEL_URL = "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
@@ -34,7 +29,7 @@ async def health():
     return {"status": "ok"}
 
 async def generate_prompt_with_llm(user_topic: str) -> str:
-    """Использует DeepSeek для составления детального англоязычного промпта под инфографику."""
+    """Генерирует короткий и емкий английский промпт через DeepSeek."""
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
@@ -44,15 +39,15 @@ async def generate_prompt_with_llm(user_topic: str) -> str:
         "messages": [
             {
                 "role": "system", 
-                "content": "You are an expert AI art prompt creator specializing in infographics, modern UI diagrams, and visual educational posters. Convert user request into a detailed English image generation prompt."
+                "content": "You are a prompt engineer for AI image generators (FLUX/Stable Diffusion). Output ONLY a concise English image prompt without conversational text, introduction, or formatting markdown."
             },
             {
                 "role": "user", 
-                "content": f"Create a concise text-to-image prompt in English for a visual infographic poster about: '{user_topic}'. Style: sleek vector layout, dark background, vivid accents, 3d elements, Dribbble style, highly detailed, 8k resolution."
+                "content": f"Create a high quality image prompt for an infographic poster about: '{user_topic}'. Style: vector infographic, modern design, dark theme, crisp typography, 8k resolution, graphic design."
             }
         ],
-        "temperature": 0.6,
-        "max_tokens": 200
+        "temperature": 0.5,
+        "max_tokens": 150
     }
     
     try:
@@ -64,36 +59,23 @@ async def generate_prompt_with_llm(user_topic: str) -> str:
     except Exception as e:
         logging.error(f"Error expanding prompt with LLM: {e}")
     
-    return f"Infographic poster design about {user_topic}, modern vector style, dark background, highly detailed"
+    return f"Infographic poster design about {user_topic}, vector design, dark background, highly detailed"
 
-async def generate_image_huggingface(prompt: str, width: int, height: int) -> bytes:
-    """Отправляет запрос в Hugging Face Inference API с обработкой ошибок сети."""
-    headers = {}
-    if HF_TOKEN:
-        headers["Authorization"] = f"Bearer {HF_TOKEN}"
-    
-    payload = {
-        "inputs": prompt,
-        "parameters": {
-            "width": width,
-            "height": height
-        }
-    }
+async def generate_image_pollinations(prompt: str, width: int, height: int) -> bytes:
+    """Генерация изображения через Pollinations AI (Flux model)."""
+    encoded_prompt = urllib.parse.quote(prompt)
+    # Используем проверенный публичный сервис без авторизации
+    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&model=flux&seed=42&nologo=true"
     
     try:
         async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-            response = await client.post(HF_MODEL_URL, headers=headers, json=payload)
-            
+            response = await client.get(url)
             if response.status_code != 200:
-                logging.error(f"HuggingFace API status {response.status_code}: {response.text}")
+                logging.error(f"Pollinations error status {response.status_code}")
                 return None
-                
             return response.content
-    except httpx.ConnectError as ce:
-        logging.error(f"HuggingFace Connection Error: {ce}")
-        return None
     except Exception as e:
-        logging.error(f"HuggingFace General Error: {e}")
+        logging.error(f"Image fetch error: {e}")
         return None
 
 @dp.message(Command("start"))
@@ -131,18 +113,18 @@ async def handle_text(msg: types.Message):
 
     await status_msg.edit_text("🎨 **Нейросеть генерирует изображение...**")
 
-    image_bytes = await generate_image_huggingface(
+    image_bytes = await generate_image_pollinations(
         prompt=image_prompt,
         width=current_format["width"],
         height=current_format["height"]
     )
 
     if not image_bytes:
-        await status_msg.edit_text("❌ Ошибка генерации. Сервер HuggingFace перегружен или недоступен. Попробуйте еще раз через полминуты.")
+        await status_msg.edit_text("❌ Ошибка генерации. Попробуйте еще раз.")
         return
 
     try:
-        document_file = BufferedInputFile(image_bytes, filename="generated_infographic.png")
+        document_file = BufferedInputFile(image_bytes, filename="infographic_art.png")
 
         await bot.send_document(
             msg.chat.id, 
