@@ -29,7 +29,7 @@ async def health():
     return {"status": "ok"}
 
 async def generate_prompt_with_llm(user_topic: str) -> str:
-    """Генерирует короткий и емкий английский промпт через DeepSeek."""
+    """Генерирует английский промпт для ЧИСТОГО шаблона инфографики БЕЗ текста."""
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
@@ -39,14 +39,19 @@ async def generate_prompt_with_llm(user_topic: str) -> str:
         "messages": [
             {
                 "role": "system", 
-                "content": "You are a prompt engineer for AI image generators (FLUX/Stable Diffusion). Output ONLY a concise English image prompt without conversational text, introduction, or formatting markdown."
+                "content": (
+                    "You are an expert AI prompt engineer. Create a prompt for a high-quality, ultra-sharp infographic TEMPLATE. "
+                    "CRITICAL REQUIREMENT: NO TEXT, NO LETTERS, NO NUMBERS, NO WORDS. "
+                    "The design must have clean empty banners, blank text blocks, geometric cards, 3D icons, and clear spatial layout so the user can add text later. "
+                    "Output ONLY the raw English prompt."
+                )
             },
             {
                 "role": "user", 
-                "content": f"Create a high quality image prompt for an infographic poster about: '{user_topic}'. Style: vector infographic, modern design, dark theme, crisp typography, 8k resolution, graphic design."
+                "content": f"Create a high-resolution infographic layout template about: '{user_topic}'. Modern UI/UX vector style, dark slate blue aesthetic, clean empty layout boxes, glossy 3D icons, sharp lines, highly detailed 8k background design."
             }
         ],
-        "temperature": 0.5,
+        "temperature": 0.4,
         "max_tokens": 150
     }
     
@@ -59,16 +64,18 @@ async def generate_prompt_with_llm(user_topic: str) -> str:
     except Exception as e:
         logging.error(f"Error expanding prompt with LLM: {e}")
     
-    return f"Infographic poster design about {user_topic}, vector design, dark background, highly detailed"
+    return f"Clean infographic template layout about {user_topic}, blank text boxes, modern vector UI, dark background, ultra sharp, 8k resolution, no text"
 
 async def generate_image_pollinations(prompt: str, width: int, height: int) -> bytes:
-    """Генерация изображения через Pollinations AI (Flux model)."""
-    encoded_prompt = urllib.parse.quote(prompt)
-    # Используем проверенный публичный сервис без авторизации
-    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&model=flux&seed=42&nologo=true"
+    """Генерация чёткого изображения без текста через Pollinations AI."""
+    # Добавляем строгий негативный промпт против текста и артефактов
+    full_prompt = f"{prompt}, ultra sharp focus, 8k quality, vector layout --no text, letters, words, watermarks, blur, low quality"
+    encoded_prompt = urllib.parse.quote(full_prompt)
+    
+    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&model=flux&seed=100&nologo=true"
     
     try:
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=75.0, follow_redirects=True) as client:
             response = await client.get(url)
             if response.status_code != 200:
                 logging.error(f"Pollinations error status {response.status_code}")
@@ -85,7 +92,7 @@ async def cmd_start(msg: types.Message):
         [types.InlineKeyboardButton(text="16:9 (Горизонтальный)", callback_data="format_1024_576")],
         [types.InlineKeyboardButton(text="9:16 (Вертикальный)", callback_data="format_576_1024")]
     ])
-    await msg.answer("🎨 **Выберите формат изображения:**", reply_markup=kb)
+    await msg.answer("🎨 **Выберите формат шаблона:**", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("format_"))
 async def set_format_callback(callback: types.CallbackQuery):
@@ -96,7 +103,7 @@ async def set_format_callback(callback: types.CallbackQuery):
     user_formats[user_id] = {"width": int(width_str), "height": int(height_str)}
     
     await callback.message.edit_text(
-        f"✅ Формат установлен на **{width_str}x{height_str}**.\nПришлите тему для генерации.",
+        f"✅ Формат установлен на **{width_str}x{height_str}**.\nПришлите тему для чистого шаблона.",
         reply_markup=None
     )
     await callback.answer("Формат установлен.", show_alert=False)
@@ -106,12 +113,12 @@ async def handle_text(msg: types.Message):
     user_id = msg.from_user.id
     current_format = user_formats.get(user_id, {"width": 1024, "height": 1024})
 
-    status_msg = await msg.answer("🧠 **Составляю детализированный арт-промпт...**")
+    status_msg = await msg.answer("🧠 **Проектирую чистый HD-шаблон без текста...**")
 
     image_prompt = await generate_prompt_with_llm(msg.text)
     logging.info(f"Generated prompt: {image_prompt}")
 
-    await status_msg.edit_text("🎨 **Нейросеть генерирует изображение...**")
+    await status_msg.edit_text("🎨 **Генерирую чёткую графику (Flux HD)...**")
 
     image_bytes = await generate_image_pollinations(
         prompt=image_prompt,
@@ -124,12 +131,12 @@ async def handle_text(msg: types.Message):
         return
 
     try:
-        document_file = BufferedInputFile(image_bytes, filename="infographic_art.png")
+        document_file = BufferedInputFile(image_bytes, filename="infographic_template.png")
 
         await bot.send_document(
             msg.chat.id, 
             document=document_file, 
-            caption=f"✅ **Ваша арт-инфографика без сжатия:** {msg.text[:50]}..."
+            caption=f"✅ **Ваш чистый шаблон (HD, без текста):** {msg.text[:50]}..."
         )
         await status_msg.delete()
     except Exception as e:
